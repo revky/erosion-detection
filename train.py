@@ -1,12 +1,12 @@
 import math
 from pathlib import Path
-
+import torch.nn as nn
 import albumentations as A
 import segmentation_models_pytorch as smp
 import torch
 from albumentations.pytorch import ToTensorV2
-from segmentation_models_pytorch.utils import losses
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+import torch.nn as nn
+from torch.optim.lr_scheduler import ReduceLROnPlateau, PolynomialLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.functional.classification import binary_accuracy, binary_f1_score, binary_recall, \
@@ -42,11 +42,16 @@ def get_transform(train, args):
     trans = []
     if train:
         trans.extend([
-
-        ])
-
+            A.RandomCrop(args['crop_size'], args['crop_size']),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+            A.GaussianBlur(blur_limit=3, p=0.5),
+            A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+            A.Rotate(limit=15, p=0.5),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5)
+        ])    
     trans.extend([
-        A.Normalize(*get_mean_std(args)),
+        #A.Normalize(*get_mean_std(args)),
         ToTensorV2(transpose_mask=True)
     ])
     trans = A.Compose(trans)
@@ -81,7 +86,7 @@ def get_datasets(args):
                                   transform=get_transform(False, args),
                                   path_to_save=args['path_to_save'],
                                   save_images=args['save_images'])
-
+    
     return train_dataset, test_dataset
 
 
@@ -164,16 +169,20 @@ def main(args):
     # Move to function
     # Add parameters to optimizer if performance sucks
     # Same with lr scheduler
-    optimizer = torch.optim.SGD(params_to_optimize, lr=args['lr'])
+    optimizer = torch.optim.SGD(params_to_optimize, lr=args['lr'], momentum = args['momentum'], weight_decay = args['weight_decay'])
 
     # TODO
     # Move to function
     # Same with lr scheduler
-    lr_scheduler = ReduceLROnPlateau(optimizer, patience=3, factor=0.5, cooldown=2, min_lr=1e-7)
+    lr_scheduler = PolynomialLR(
+        optimizer, total_iters= len(train_loader) * args['epochs'], power=0.9
+    )
+    
+#     lr_scheduler = ReduceLROnPlateau(optimizer, patience = 3, factor=0.5, cooldown=2, min_lr=1e-7)
 
     # TODO
     # Move to function
-    loss_fn = losses.BCEWithLogitsLoss() + losses.DiceLoss()
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight = torch.Tensor([args['class_weight']]).cuda())
 
     # TODO
     # Move to function
@@ -188,7 +197,6 @@ def main(args):
     # TODO
     # Add resuming
     best_test_loss = float('inf')
-
     writer = SummaryWriter(log_dir='./runs')
     for epoch in range(1, args['epochs']):
         train_loss = train_epoch(
@@ -209,11 +217,14 @@ def main(args):
             device,
             writer
         )
-
-        lr_scheduler.step(test_loss)
+        
         header = f'EPOCH {epoch}|'
         train_loss_summary = f'TRAIN LOSS: {train_loss:.3f}| '
         test_loss_summary = f'TEST LOSS: {test_loss:.3f}| '
         eval_summary = ''.join(f'TEST_{key.upper()}: {value:.3f}| '.format(key) for key, value in eval_metrics.items())
-
-        print(header, train_loss_summary, test_loss_summary, eval_summary)
+        print(header, train_loss_summary, test_loss_summary, eval_summary)  
+        
+        if test_loss < best_test_loss:
+            best_test_loss = test_loss
+            torch.save(model.state_dict(), args['model_save_path'])
+            print('Saving new best model at', args['model_save_path'])
