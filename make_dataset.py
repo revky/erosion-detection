@@ -22,7 +22,7 @@ def make_patches(image: bytes,
     save_path = Path(save_path)
 
     def get_save_str(height_cord: int, width_cord: int):
-        parent_path = save_path / str(patch_size) / ('mask' if mask else 'image')
+        parent_path = save_path / str(patch_size)
         parent_path.mkdir(exist_ok=True, parents=True)
         return str(parent_path / f'x_{height_cord}y_{width_cord}.jpg')
 
@@ -33,6 +33,7 @@ def make_patches(image: bytes,
                                 stop=width + 1,
                                 step=patch_size):
             clipped_img = reshape_as_image(image[:, h_cord - patch_size: h_cord, w_cord - patch_size: w_cord])
+
             if not mask:
                 clipped_img = cv2.cvtColor(clipped_img, cv2.COLOR_RGB2BGR)
 
@@ -52,22 +53,20 @@ def main(args):
     assert i_width == m_width and i_height == m_height, "Image and mask have different shapes"
 
     try:
-        make_patches(image, args.patch_size, i_width, i_height, args.save_path, False)
-        make_patches(mask, args.patch_size, i_width, i_height, args.save_path, True)
+        make_patches(image, args.patch_size, i_width, i_height, args.images_dir, False)
+        make_patches(mask, args.patch_size, i_width, i_height, args.masks_dir, True)
+        print('Images saved successfully')
     except cv2.error as e:
         print('Error saving image')
-
-    print('Images saved successfully')
 
 
 def get_args_parser(add_help=True):
     parser = argparse.ArgumentParser(add_help=add_help)
-
     parser.add_argument("--image_path", default="data/raw/image.jp2", type=str, help="image raster path")
     parser.add_argument("--mask_path", default="data/raw/mask.jp2", type=str, help="mask raster path")
     parser.add_argument("--patch_size", default=256, type=int, help="desired patch size")
-    parser.add_argument("--save_path", default="data", type=str, help="clipped data save path")
-
+    parser.add_argument("--images_dir", default="data/images", type=str, help="path to save new images")
+    parser.add_argument("--masks_dir", default="data/masks", type=str, help="path to save new masks")
     return parser
 
 

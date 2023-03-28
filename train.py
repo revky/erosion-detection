@@ -1,6 +1,5 @@
 import math
 from pathlib import Path
-import torch.nn as nn
 import albumentations as A
 import segmentation_models_pytorch as smp
 import torch
