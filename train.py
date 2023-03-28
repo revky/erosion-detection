@@ -1,11 +1,12 @@
 import math
 from pathlib import Path
+
 import albumentations as A
 import segmentation_models_pytorch as smp
 import torch
 from albumentations.pytorch import ToTensorV2
-import torch.nn as nn
-from torch.optim.lr_scheduler import ReduceLROnPlateau, PolynomialLR
+from segmentation_models_pytorch.utils import losses
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.functional.classification import binary_accuracy, binary_f1_score, binary_recall, \
@@ -15,42 +16,21 @@ from tqdm.auto import tqdm
 from dataset import SegmentDataset
 
 
-def get_mean_std(args):
-    p = Path(args['mean_std_path'])
-    if p.exists():
-        file = torch.load(p)
-        print('Mean and std loaded from cashe.')
-        return file['mean'], file['std']
-
-    ds = SegmentDataset(image_path=args['image_path'],
-                        mask_path=args['mask_path'],
-                        patch_size=args['patch_size'],
-                        transform=ToTensorV2())
-
-    dl = DataLoader(ds, batch_size=len(ds), shuffle=False, num_workers=args['num_workers'])
-    images, _ = next(iter(dl))
-    print(images.shape)
-    images = images / 255
-    # shape of images = [b,c,w,h]
-    mean, std = images.mean([0, 2, 3]), images.std([0, 2, 3])
-    torch.save({'mean': mean, 'std': std}, args['mean_std_path'])
-    return mean, std
-
-
 def get_transform(train, args):
     trans = []
     if train:
         trans.extend([
-            A.RandomCrop(args['crop_size'], args['crop_size']),
-            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-            A.GaussianBlur(blur_limit=3, p=0.5),
-            A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
-            A.Rotate(limit=15, p=0.5),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5)
-        ])    
+            A.OneOf([
+                A.HorizontalFlip(p=1),
+                A.VerticalFlip(p=1),
+                A.Transpose(p=1),
+            ], p=1),
+            A.OneOf([
+                A.Rotate(limit=90),
+                A.Rotate(limit=90),
+            ], p=1),
+        ])
     trans.extend([
-        #A.Normalize(*get_mean_std(args)),
         ToTensorV2(transpose_mask=True)
     ])
     trans = A.Compose(trans)
@@ -59,11 +39,9 @@ def get_transform(train, args):
 
 def get_samplers(train_len, args):
     indices = torch.randperm(train_len)
-
     # Count limit number for train and val ids
     split = int(math.ceil(args['test_ratio'] * train_len))
     train_idx, test_idx = indices[split:], indices[:split]
-
     # Create sampler for given ids
     train_sampler = torch.utils.data.SubsetRandomSampler(train_idx)
     test_sampler = torch.utils.data.SubsetRandomSampler(test_idx)
@@ -72,24 +50,21 @@ def get_samplers(train_len, args):
 
 
 def get_datasets(args):
-    train_dataset = SegmentDataset(image_path=args['image_path'],
-                                   mask_path=args['mask_path'],
-                                   patch_size=args['patch_size'],
-                                   transform=get_transform(True, args),
-                                   path_to_save=args['path_to_save'],
-                                   save_images=args['save_images'])
+    images_dir = Path(args['images_dir']) / str(args['patch_size'])
+    masks_dir = Path(args['masks_dir']) / str(args['patch_size'])
 
-    test_dataset = SegmentDataset(image_path=args['image_path'],
-                                  mask_path=args['mask_path'],
-                                  patch_size=args['patch_size'],
-                                  transform=get_transform(False, args),
-                                  path_to_save=args['path_to_save'],
-                                  save_images=args['save_images'])
-    
+    train_dataset = SegmentDataset(images_dir=images_dir,
+                                   masks_dir=masks_dir,
+                                   transform=get_transform(True, args))
+
+    test_dataset = SegmentDataset(images_dir=images_dir,
+                                  masks_dir=masks_dir,
+                                  transform=get_transform(False, args))
+
     return train_dataset, test_dataset
 
 
-def train_epoch(model, loss_fn, optimizer, train_loader, epoch, device, writer):
+def train_epoch(model, loss_fn, optimizer, train_loader, lr_scheduler, epoch, device, writer):
     model.train()
     train_loss = 0.0
     for (images, targets) in tqdm(train_loader):
@@ -132,6 +107,43 @@ def test_epoch(model, loss_fn, test_loader, metrics, epoch, device, writer):
     return test_loss, metrics_mean
 
 
+def get_model(args):
+    device = args['device']
+    model = smp.Unet(
+        encoder_name=args['encoder_name'],
+        encoder_weights=args['encoder_weights']
+    )
+    model.to(device)
+    return model
+
+
+def get_optimizer(model, args):
+    if args['opt'] == 'sgd':
+        return torch.optim.SGD(model.parameters(),
+                               lr=args['lr'],
+                               momentum=args['momentum'],
+                               weight_decay=args['weight_decay'])
+    raise NotImplementedError
+
+
+def get_scheduler(optimizer, args):
+    if args['scheduler'] == 'plat':
+        return ReduceLROnPlateau(optimizer, patience=args['patience'], factor=args['factor'], cooldown=2, min_lr=1e-6)
+    raise NotImplementedError
+
+
+def get_loss_fn(args):
+    if args['loss_fn'] == 'bce':
+        return losses.BCEWithLogitsLoss(pos_weight=torch.Tensor([args['class_weight']]).to(args['device']))
+
+    if args['loss_fn'] == 'dice':
+        return losses.DiceLoss()
+
+    if args['loss_fn'] == 'focal':
+        return smp.losses.FocalLoss(mode='binary', alpha=torch.Tensor([args['class_weight']]).to(args['device']))
+    raise NotImplementedError
+
+
 def main(args):
     device = torch.device(args['device'])
     train_dataset, test_dataset = get_datasets(args)
@@ -153,35 +165,10 @@ def main(args):
         num_workers=args['num_workers']
     )
 
-    model = smp.Unet(
-        encoder_name=args['encoder_name'],
-        encoder_weights=args['encoder_weights']
-    )
-    model.to(device)
-
-    params_to_optimize = [
-        {'params': [p for p in model.decoder.parameters() if p.requires_grad]},
-        {'params': [p for p in model.encoder.parameters() if p.requires_grad]}
-    ]
-
-    # TODO
-    # Move to function
-    # Add parameters to optimizer if performance sucks
-    # Same with lr scheduler
-    optimizer = torch.optim.SGD(params_to_optimize, lr=args['lr'], momentum = args['momentum'], weight_decay = args['weight_decay'])
-
-    # TODO
-    # Move to function
-    # Same with lr scheduler
-    lr_scheduler = PolynomialLR(
-        optimizer, total_iters= len(train_loader) * args['epochs'], power=0.9
-    )
-    
-#     lr_scheduler = ReduceLROnPlateau(optimizer, patience = 3, factor=0.5, cooldown=2, min_lr=1e-7)
-
-    # TODO
-    # Move to function
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight = torch.Tensor([args['class_weight']]).cuda())
+    model = get_model(args)
+    loss_fn = get_loss_fn(args)
+    optimizer = get_optimizer(model, args)
+    lr_scheduler = get_scheduler(optimizer, args)
 
     # TODO
     # Move to function
@@ -197,16 +184,19 @@ def main(args):
     # Add resuming
     best_test_loss = float('inf')
     writer = SummaryWriter(log_dir='./runs')
+
     for epoch in range(1, args['epochs']):
         train_loss = train_epoch(
             model,
             loss_fn,
             optimizer,
             train_loader,
+            lr_scheduler,
             epoch,
             device,
             writer
         )
+
         test_loss, eval_metrics = test_epoch(
             model,
             loss_fn,
@@ -216,13 +206,14 @@ def main(args):
             device,
             writer
         )
-        
+        lr_scheduler.step(test_loss)
+
         header = f'EPOCH {epoch}|'
         train_loss_summary = f'TRAIN LOSS: {train_loss:.3f}| '
         test_loss_summary = f'TEST LOSS: {test_loss:.3f}| '
         eval_summary = ''.join(f'TEST_{key.upper()}: {value:.3f}| '.format(key) for key, value in eval_metrics.items())
-        print(header, train_loss_summary, test_loss_summary, eval_summary)  
-        
+        print(header, train_loss_summary, test_loss_summary, eval_summary)
+
         if test_loss < best_test_loss:
             best_test_loss = test_loss
             torch.save(model.state_dict(), args['model_save_path'])
