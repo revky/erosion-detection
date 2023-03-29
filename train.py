@@ -1,3 +1,4 @@
+import argparse
 import math
 from pathlib import Path
 
@@ -21,8 +22,11 @@ def get_transform(train, args):
     if train:
         trans.extend([
             A.OneOf([
-                A.RandomSizedCrop(min_max_height=(100, 151), height=args['patch_size'], width=args['patch_size'], p=0.5),
-                A.PadIfNeeded(min_height=args['patch_size'], min_width=args['patch_size'], p=0.5)
+                A.RandomSizedCrop(min_max_height=(100, 151),
+                                  height=args.patch_size,
+                                  width=args.patch_size, p=0.5),
+                A.PadIfNeeded(min_height=args.patch_size,
+                              min_width=args.patch_size, p=0.5)
             ], p=1),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
@@ -41,7 +45,7 @@ def get_transform(train, args):
 def get_samplers(train_len, args):
     indices = torch.randperm(train_len)
     # Count limit number for train and val ids
-    split = int(math.ceil(args['test_ratio'] * train_len))
+    split = int(math.ceil(args.test_ratio * train_len))
     train_idx, test_idx = indices[split:], indices[:split]
     # Create sampler for given ids
     train_sampler = torch.utils.data.SubsetRandomSampler(train_idx)
@@ -51,24 +55,24 @@ def get_samplers(train_len, args):
 
 
 def get_datasets(args):
-    images_dir = Path(args['images_dir']) / str(args['patch_size'])
-    masks_dir = Path(args['masks_dir']) / str(args['patch_size'])
+    images_dir = Path(args.images_dir) / str(args.patch_size)
+    masks_dir = Path(args.masks_dir) / str(args.patch_size)
 
     train_dataset = SegmentDataset(images_dir=images_dir,
                                    masks_dir=masks_dir,
                                    transform=get_transform(True, args),
-                                   add_empty_masks=args['add_empty_masks'])
+                                   add_empty_masks=args.add_masks)
     # TODO
     # SUS (2x generated masks idx, may cause problems)
     test_dataset = SegmentDataset(images_dir=images_dir,
                                   masks_dir=masks_dir,
                                   transform=get_transform(False, args),
-                                  add_empty_masks=args['add_empty_masks'])
+                                  add_empty_masks=args.add_masks)
 
     return train_dataset, test_dataset
 
 
-def train_epoch(model, loss_fn, optimizer, train_loader, lr_scheduler, epoch, device, writer):
+def train_epoch(model, loss_fn, optimizer, train_loader, epoch, device, writer):
     model.train()
     train_loss = 0.0
     for (images, targets) in tqdm(train_loader):
@@ -112,64 +116,59 @@ def test_epoch(model, loss_fn, test_loader, metrics, epoch, device, writer):
 
 
 def get_model(args):
-    device = args['device']
     model = smp.Unet(
-        encoder_name=args['encoder_name'],
-        encoder_weights=args['encoder_weights']
+        encoder_name=args.encoder_name,
+        encoder_weights=args.encoder_weights
     )
-    model.to(device)
     return model
 
 
 def get_optimizer(model, args):
-    if args['opt'] == 'sgd':
-        return torch.optim.SGD(model.parameters(),
-                               lr=args['lr'],
-                               momentum=args['momentum'],
-                               weight_decay=args['weight_decay'])
+    if args.opt == 'adam':
+        return torch.optim.Adam(model.parameters(), weight_decay=args.weight_decay)
     raise NotImplementedError
 
 
 def get_scheduler(optimizer, args):
-    if args['scheduler'] == 'plat':
-        return ReduceLROnPlateau(optimizer, patience=args['patience'], factor=args['factor'], cooldown=2, min_lr=1e-6)
+    if args.scheduler == 'plat':
+        return ReduceLROnPlateau(optimizer, patience=args.patience, factor=0.5, cooldown=2, min_lr=1e-7)
     raise NotImplementedError
 
 
 def get_loss_fn(args):
-    if args['loss_fn'] == 'bce':
-        return losses.BCEWithLogitsLoss(pos_weight=torch.Tensor([args['class_weight']]).to(args['device']))
+    if args.loss_fn == 'bce':
+        return losses.BCEWithLogitsLoss(pos_weight=torch.Tensor([args.class_weight]).to(args.device))
 
-    if args['loss_fn'] == 'dice':
+    if args.loss_fn == 'dice':
         return losses.DiceLoss()
 
-    if args['loss_fn'] == 'focal':
-        return smp.losses.FocalLoss(mode='binary', alpha=torch.Tensor([args['class_weight']]).to(args['device']))
+    if args.loss_fn == 'focal':
+        return smp.losses.FocalLoss(mode='binary', alpha=torch.Tensor([args.class_weight]).to(args.device))
     raise NotImplementedError
 
 
 def main(args):
-    device = torch.device(args['device'])
+    device = torch.device(args.device)
     train_dataset, test_dataset = get_datasets(args)
     train_len = len(train_dataset)
     train_sampler, test_sampler = get_samplers(train_len, args)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args['batch_size'],
+        batch_size=args.batch_size,
         shuffle=False,
         sampler=train_sampler,
-        num_workers=args['num_workers']
+        num_workers=args.num_workers
     )
 
     test_loader = DataLoader(
         test_dataset,
-        batch_size=args['batch_size'],
+        batch_size=args.batch_size,
         shuffle=False,
         sampler=test_sampler,
-        num_workers=args['num_workers']
+        num_workers=args.num_workers
     )
 
-    model = get_model(args)
+    model = get_model(args).to(device)
     loss_fn = get_loss_fn(args)
     optimizer = get_optimizer(model, args)
     lr_scheduler = get_scheduler(optimizer, args)
@@ -189,13 +188,12 @@ def main(args):
     best_precision = 0.0
     writer = SummaryWriter(log_dir='./runs')
 
-    for epoch in range(1, args['epochs']):
+    for epoch in range(1, args.epochs + 1):
         train_loss = train_epoch(
             model,
             loss_fn,
             optimizer,
             train_loader,
-            lr_scheduler,
             epoch,
             device,
             writer
@@ -220,5 +218,36 @@ def main(args):
 
         if eval_metrics['precision'] > best_precision:
             best_precision = eval_metrics['precision']
-            torch.save(model.state_dict(), args['model_save_path'])
-            print('Saving new best model at', args['model_save_path'])
+            torch.save(model.state_dict(), args.best_model_path)
+            print('Saving new best model at', args.best_model_path)
+
+
+def get_args_parser(add_help=True):
+    parser = argparse.ArgumentParser(add_help=add_help)
+    parser.add_argument("--patch_size", default=256, type=int, help="desired patch size")
+    parser.add_argument("--images_dir", default="data/images", type=str, help="path to save new images")
+    parser.add_argument("--masks_dir", default="data/masks", type=str, help="path to save new masks")
+    parser.add_argument("--test_ratio", default=0.2, type=float, help="train/test ratio")
+    parser.add_argument("--device", default='cuda', type=str, help="device type")
+    parser.add_argument("--batch_size", default=4, type=int, help="pipeline batch size")
+    parser.add_argument("--num_workers", default=0, type=int, help="cpu workers")
+    parser.add_argument("--lr", default=1e-3, type=float, help="learning rate")
+    parser.add_argument("--weight_decay", default=2e-5, type=float, help="optimizer weight decay")
+    parser.add_argument("--epochs", default=250, type=int, help="number of epochs")
+    parser.add_argument("--encoder_name", default='efficientnet-b2', type=str, help="pretrained model architecture")
+    parser.add_argument("--encoder_weights", default='imagenet', type=str, help="model weights")
+    parser.add_argument("--best_model_path", default='model/best_model.pth', type=str, help="path to save best model")
+    parser.add_argument("--class_weight", default=50, type=int, help="balance factor")
+
+    parser.add_argument("--loss_fn", default='bce', type=str, help="desired loss function")
+    parser.add_argument("--opt", default='adam', type=str, help="desired optimizer")
+    parser.add_argument("--scheduler", default='plat', type=str, help="desired lr scheduler")
+    parser.add_argument("--patience", default=4, type=int, help="lr scheduler patience")
+    parser.add_argument("--add_masks", default=50, type=int, help="non empty masks + N empty")
+
+    return parser
+
+
+if __name__ == '__main__':
+    args = get_args_parser().parse_args()
+    main(args)
