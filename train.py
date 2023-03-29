@@ -21,15 +21,16 @@ def get_transform(train, args):
     if train:
         trans.extend([
             A.OneOf([
-                A.HorizontalFlip(p=1),
-                A.VerticalFlip(p=1),
-                A.Transpose(p=1),
+                A.RandomSizedCrop(min_max_height=(100, 151), height=args['patch_size'], width=args['patch_size'], p=0.5),
+                A.PadIfNeeded(min_height=args['patch_size'], min_width=args['patch_size'], p=0.5)
             ], p=1),
+            A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
             A.OneOf([
-                A.Rotate(limit=90),
-                A.Rotate(limit=90),
-            ], p=1),
-        ])
+                A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
+                A.GridDistortion(p=0.5),
+                A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=1),
+            ], p=0.8)])
     trans.extend([
         ToTensorV2(transpose_mask=True)
     ])
@@ -55,11 +56,14 @@ def get_datasets(args):
 
     train_dataset = SegmentDataset(images_dir=images_dir,
                                    masks_dir=masks_dir,
-                                   transform=get_transform(True, args))
-
+                                   transform=get_transform(True, args),
+                                   add_empty_masks=args['add_empty_masks'])
+    # TODO
+    # SUS (2x generated masks idx, may cause problems)
     test_dataset = SegmentDataset(images_dir=images_dir,
                                   masks_dir=masks_dir,
-                                  transform=get_transform(False, args))
+                                  transform=get_transform(False, args),
+                                  add_empty_masks=args['add_empty_masks'])
 
     return train_dataset, test_dataset
 
@@ -182,7 +186,7 @@ def main(args):
 
     # TODO
     # Add resuming
-    best_test_loss = float('inf')
+    best_precision = 0.0
     writer = SummaryWriter(log_dir='./runs')
 
     for epoch in range(1, args['epochs']):
@@ -206,7 +210,7 @@ def main(args):
             device,
             writer
         )
-        lr_scheduler.step(test_loss)
+        lr_scheduler.step(eval_metrics['precision'])
 
         header = f'EPOCH {epoch}|'
         train_loss_summary = f'TRAIN LOSS: {train_loss:.3f}| '
@@ -214,7 +218,7 @@ def main(args):
         eval_summary = ''.join(f'TEST_{key.upper()}: {value:.3f}| '.format(key) for key, value in eval_metrics.items())
         print(header, train_loss_summary, test_loss_summary, eval_summary)
 
-        if test_loss < best_test_loss:
-            best_test_loss = test_loss
+        if eval_metrics['precision'] > best_precision:
+            best_precision = eval_metrics['precision']
             torch.save(model.state_dict(), args['model_save_path'])
             print('Saving new best model at', args['model_save_path'])

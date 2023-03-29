@@ -21,10 +21,14 @@ def make_patches(image: bytes,
                  mask: bool = False):
     save_path = Path(save_path)
 
-    def get_save_str(height_cord: int, width_cord: int):
+    def get_save_str(height_cord: int, width_cord: int, pixel_ratio: float):
         parent_path = save_path / str(patch_size)
         parent_path.mkdir(exist_ok=True, parents=True)
-        return str(parent_path / f'x_{height_cord}y_{width_cord}.jpg')
+        return str(parent_path / f'x_{height_cord}y_{width_cord}_{pixel_ratio}.jpg')
+
+    def get_pixel_ratio(clip_image):
+        rate = clip_image.sum() / patch_size ** 2
+        return 1 if rate > 0 else 0
 
     for h_cord in np.arange(start=patch_size,
                             stop=height + 1,
@@ -32,12 +36,16 @@ def make_patches(image: bytes,
         for w_cord in np.arange(start=patch_size,
                                 stop=width + 1,
                                 step=patch_size):
+
             clipped_img = reshape_as_image(image[:, h_cord - patch_size: h_cord, w_cord - patch_size: w_cord])
+            pixel_ratio = 1
+            if mask:
+                pixel_ratio = get_pixel_ratio(clipped_img)
 
             if not mask:
                 clipped_img = cv2.cvtColor(clipped_img, cv2.COLOR_RGB2BGR)
 
-            if cv2.imwrite(get_save_str(h_cord, w_cord), clipped_img) is False:
+            if cv2.imwrite(get_save_str(h_cord, w_cord, pixel_ratio), clipped_img) is False:
                 raise cv2.error
 
 

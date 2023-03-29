@@ -1,5 +1,7 @@
-from typing import Union
+import re
 from pathlib import Path
+from typing import Union
+
 import albumentations as A
 import cv2
 import numpy as np
@@ -12,12 +14,23 @@ class SegmentDataset(Dataset):
                  images_dir: Path,
                  masks_dir: Path,
                  transform: Union[A.Compose, ToTensorV2] = None,
-                 empty_fraction: int = None):
+                 add_empty_masks: int = None):
         super().__init__()
-        self.images = sorted(images_dir.glob("*.jpg"))
-        self.masks = sorted(masks_dir.glob("*.jpg"))
+        self.images = np.array(sorted(images_dir.glob("*.jpg")))
+        self.masks = np.array(sorted(masks_dir.glob("*.jpg")))
         self.transform = transform
-        self.empty_fraction = empty_fraction
+        self.add_empty_masks = add_empty_masks
+
+        if self.add_empty_masks:
+            binary_mask = np.ma.make_mask([int(re.compile(r'\d\.').search(str(mask))[0][:-1]) for mask in self.masks])
+            false_indices = np.where(binary_mask is False)[0]
+            if self.add_empty_masks > len(false_indices):
+                self.add_empty_masks = len(false_indices)
+            indices_to_invert = np.random.choice(false_indices, size=self.add_empty_masks, replace=False)
+
+            binary_mask[indices_to_invert] = True
+            self.images = self.images[binary_mask]
+            self.masks = self.masks[binary_mask]
 
     def __len__(self):
         return len(self.images)
