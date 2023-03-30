@@ -21,7 +21,7 @@ class SegmentDataset(Dataset):
         self.transform = transform
         self.add_empty_masks = add_empty_masks
 
-        if self.add_empty_masks:
+        if self.add_empty_masks is not None:
             binary_mask = np.ma.make_mask([int(re.compile(r'\d\.').search(str(mask))[0][:-1]) for mask in self.masks])
             false_indices = np.where(binary_mask is False)[0]
             if self.add_empty_masks > len(false_indices):
